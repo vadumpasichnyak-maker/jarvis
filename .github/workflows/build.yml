@@ -71,6 +71,12 @@ jobs:
                       <action android:name="android.intent.action.MAIN" />
                       <category android:name="android.intent.category.LAUNCHER" />
                   </intent>
+                  <intent>
+                      <action android:name="android.intent.action.TTS_SERVICE" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
               </queries>
 
               <application
@@ -254,7 +260,12 @@ jobs:
                   listen()
               }
 
+              private fun toast(msg: String) {
+                  android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
+              }
+
               override fun onInit(status: Int) {
+                  if (status != TextToSpeech.SUCCESS) { toast("Синтез мовлення не запустився"); return }
                   tts.language = Locale("uk", "UA")
                   say("Системи в нормі, сер. Я весь у вашому розпорядженні.")
               }
@@ -281,6 +292,7 @@ jobs:
                               restart(200)
                           }
                           override fun onError(error: Int) {
+                              if (error != 6 && error != 7 && error != 8) toast("Помилка розпізнавання: $error")
                               restart(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1500 else 300)
                           }
                           override fun onReadyForSpeech(p: Bundle?) {}
@@ -308,6 +320,7 @@ jobs:
 
               private fun handle(text: String) {
                   val t = text.lowercase()
+                  toast("Почув: $text")
                   val m = Regex("(джарвіс|джарвис|джарвіз|жарвіс|jarvis)").find(t) ?: return
                   val cmd = t.substring(m.range.last + 1).trim(' ', ',', '.', '!')
                   if (cmd.isEmpty()) { say("Слухаю, сер."); return }
