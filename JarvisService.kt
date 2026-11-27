@@ -145,7 +145,6 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private val modelExecutor = Executors.newSingleThreadExecutor()
 
 private fun loadModel() {
     toast("Завантажую мовну модель (перший раз до хвилини)...")
