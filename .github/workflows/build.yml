@@ -1,33 +1,42 @@
 name: Build Jarvis
+
 on:
   push:
   workflow_dispatch:
+
 permissions:
   contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+
       - name: Download Ukrainian speech model
         run: |
-          curl -fL --retry 3 -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-uk-v3-small.zip || curl -fL --retry 3 -o model.zip https://huggingface.co/rhasspy/vosk-models/resolve/main/uk/vosk-model-small-uk-v3-small.zip
+          curl -fL --retry 3 -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-uk-v3-small.zip
           unzip -q model.zip -d tmpmodel
-          mkdir -p project/app/src/main/assets
-          mv "$(ls -d tmpmodel/*/ | head -1)" project/app/src/main/assets/model-uk
+          mkdir -p project/app/src/main/assets/model-uk
+          mv "$(ls -d tmpmodel/*/ | head -1)"* project/app/src/main/assets/model-uk/
           cat /proc/sys/kernel/random/uuid > project/app/src/main/assets/model-uk/uuid
-          rm model.zip
+          rm -rf model.zip tmpmodel
+
       - name: Build APK
+        working-directory: project
         run: gradle assembleDebug --no-daemon
+
       - name: Publish APK
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "build-$(date +%Y%m%d-%H%M%S)" project/app/build/outputs/apk/debug/app-debug.apk --repo "$GITHUB_REPOSITORY" --title "Jarvis" --notes "Jarvis APK"
+          gh release create "build-$(date +%Y%m%d-%H%M%S)" project/app/build/outputs/apk/debug/app-debug.apk --repo "$GITHUB_REPOSITORY" --title "Build $(date +%Y-%m-%d)" --notes "Automated debug build"
