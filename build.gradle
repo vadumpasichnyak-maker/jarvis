@@ -59,3 +59,25 @@ preBuild.doFirst {
         new File(targetDir, 'accessibility_config.xml').bytes = sourceFile.bytes
     }
 }
+tasks.register("syncStringsXml") {
+    doLast {
+        def targetDir = file("src/main/res/values")
+        targetDir.mkdirs()
+
+        def sourceFile = file("strings.xml").exists()
+                ? file("strings.xml")
+                : file("jarvis_strings.xml")
+
+        if (sourceFile.exists()) {
+            copy {
+                from sourceFile
+                into targetDir
+                rename { "strings.xml" }
+            }
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn("syncStringsXml")
+}
