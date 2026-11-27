@@ -26,7 +26,6 @@ jobs:
           cat /proc/sys/kernel/random/uuid > project/app/src/main/assets/model-uk/uuid
           rm model.zip
       - name: Build APK
-        working-directory: project
               working-directory: .
               
       - name: Publish APK
