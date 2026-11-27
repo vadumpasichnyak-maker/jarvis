@@ -96,6 +96,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     // ---------- Життєвий цикл ----------
 
     override fun onCreate() {
+        try {
         super.onCreate()
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
@@ -122,6 +123,9 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     loadModel()
 } catch (e: Exception) {
     android.util.Log.e("JarvisService", "Failed to load model", e)
+        }
+        } catch (e: Exception) {
+        android.util.Log.e("JarvisService", "onCreate crash", e)
         }
     }
 
