@@ -29,6 +29,8 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private lateinit var tts: TextToSpeech
     private val handler = Handler(Looper.getMainLooper())
     private val bg = Executors.newSingleThreadExecutor()
+    private val modelExecutor = Executors.newSingleThreadExecutor()
+    
     private val resume = Runnable { resumeListening() }
     private val wake = Regex("(дж[аеи]\\p{L}*|жарв\\p{L}*|чарв\\p{L}*|ярвіс|jarvis)")
     private var conversationUntil = 0L
@@ -143,20 +145,33 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun loadModel() {
-        StorageService.unpack(
-            this, "model-uk", "model",
-            StorageService.Callback<Model> { model ->
-                val rec = Recognizer(model, 16000.0f)
-                speech = SpeechService(rec, 16000.0f)
-                speech?.startListening(listener)
-                toast("Джарвіс слухає")
-            },
-            StorageService.Callback<java.io.IOException> { e ->
-                toast("Помилка моделі: ${e.message}")
+    private val modelExecutor = Executors.newSingleThreadExecutor()
+
+private fun loadModel() {
+    toast("Завантажую мовну модель (перший раз до хвилини)...")
+    StorageService.unpack(
+        this, "model-uk", "model",
+        StorageService.Callback<Model> { model ->
+            modelExecutor.execute {
+                try {
+                    val rec = Recognizer(model, 16000.0f)
+                    val svc = SpeechService(rec, 16000.0f)
+                    handler.post {
+                        speech = svc
+                        svc.startListening(listener)
+                        toast("Джарвіс слухає")
+                    }
+                } catch (e: Throwable) {
+                    android.util.Log.e("JarvisService", "Recognizer init failed", e)
+                    toast("Помилка розпізнавача: " + (e.message ?: ""))
+                }
             }
-        )
-    }
+        },
+        StorageService.Callback<java.io.IOException> { e ->
+            toast("Помилка моделі: " + (e.message ?: ""))
+        }
+    )
+}
 
     private val listener = object : RecognitionListener {
         override fun onPartialResult(hypothesis: String?) {}
