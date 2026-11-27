@@ -50,3 +50,12 @@ dependencies {
     implementation 'net.java.dev.jna:jna:5.13.0@aar'
     implementation 'com.alphacephei:vosk-android:0.3.47@aar'
 }
+
+preBuild.doFirst {
+    def targetDir = new File(projectDir, 'src/main/res/xml')
+    targetDir.mkdirs()
+    def sourceFile = new File(projectDir, 'accessibility_config.xml')
+    if (sourceFile.exists()) {
+        new File(targetDir, 'accessibility_config.xml').bytes = sourceFile.bytes
+    }
+}
