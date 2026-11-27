@@ -19,11 +19,10 @@ jobs:
       - name: Download Ukrainian speech model
         run: |
           curl -fL --retry 3 -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-uk-v3-small.zip || curl -fL --retry 3 -o model.zip https://huggingface.co/rhasspy/vosk-models/resolve/main/uk/vosk-model-small-uk-v3-small.zip
-          cat model.zip.* > model.zip && unzip -q model.zip -d tmpmodel
+          unzip -q model.zip -d tmpmodel
           mkdir -p project/app/src/main/assets
-          mv "$(ls -d tmpmodel/*/ | head -1)" project/app/src/main/assets/model-uk
-          cat /proc/sys/kernel/random/uuid > project/app/src/main/assets/model-uk/uuid
-          rm model.zip
+          mv "$(ls -d tmpmodel/* | head -1)" project/app/src/main/assets/model
+          rm -rf model.zip tmpmodel
       - name: Build APK
         working-directory: .
         run: ./gradlew assembleDebug --no-daemon     
