@@ -27,7 +27,8 @@ jobs:
           rm model.zip
       - name: Build APK
         working-directory: .
-              
+        run: ./gradlew assembleDebug --no-daemon
+                
       - name: Publish APK
         env:
           GH_TOKEN: ${{ github.token }}
