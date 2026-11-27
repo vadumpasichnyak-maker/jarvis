@@ -1,0 +1,494 @@
+name: Build Jarvis
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Create project
+        run: |
+          mkdir -p app/src/main/java/com/example/jarvis app/src/main/res/xml app/src/main/res/values
+          cat > settings.gradle <<'JARVIS_EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Jarvis"
+          include ':app'
+          JARVIS_EOF
+          cat > build.gradle <<'JARVIS_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          JARVIS_EOF
+          cat > gradle.properties <<'JARVIS_EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          JARVIS_EOF
+          cat > app/build.gradle <<'JARVIS_EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.example.jarvis'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.example.jarvis'
+                  minSdk 31
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+                  ndk { abiFilters 'arm64-v8a' }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+          }
+          dependencies {
+              implementation 'net.java.dev.jna:jna:5.13.0@aar'
+              implementation 'com.alphacephei:vosk-android:0.3.47@aar'
+          }
+          JARVIS_EOF
+          cat > app/src/main/AndroidManifest.xml <<'JARVIS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.TTS_SERVICE" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:label="Jarvis"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".JarvisService"
+                      android:exported="false"
+                      android:foregroundServiceType="microphone" />
+
+                  <service
+                      android:name=".JarvisAccessibility"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          JARVIS_EOF
+          cat > app/src/main/res/xml/accessibility_config.xml <<'JARVIS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canPerformGestures="true"
+              android:description="@string/jarvis_a11y_desc" />
+          JARVIS_EOF
+          cat > app/src/main/res/values/jarvis_strings.xml <<'JARVIS_EOF'
+          <resources>
+              <string name="jarvis_a11y_desc">Дозволяє Джарвісу робити свайпи та натискати Назад/Додому за голосовою командою.</string>
+          </resources>
+          JARVIS_EOF
+          cat > app/src/main/java/com/example/jarvis/MainActivity.kt <<'JARVIS_EOF'
+          package com.example.jarvis
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.LinearLayout
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(48, 120, 48, 48)
+                  }
+                  fun btn(text: String, onClick: () -> Unit) {
+                      root.addView(Button(this).apply { this.text = text; setOnClickListener { onClick() } })
+                  }
+                  btn("1. Дозволити мікрофон і сповіщення") {
+                      requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), 1)
+                  }
+                  btn("2. Дозволити поверх інших вікон") {
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                  }
+                  btn("3. Увімкнути спеціальні можливості (Jarvis)") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+                  btn("4. Запустити Джарвіса") {
+                      startForegroundService(Intent(this, JarvisService::class.java))
+                  }
+                  btn("Зупинити") { stopService(Intent(this, JarvisService::class.java)) }
+                  setContentView(root)
+              }
+          }
+          JARVIS_EOF
+          cat > app/src/main/java/com/example/jarvis/JarvisAccessibility.kt <<'JARVIS_EOF'
+          package com.example.jarvis
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Path
+          import android.view.accessibility.AccessibilityEvent
+
+          class JarvisAccessibility : AccessibilityService() {
+
+              companion object {
+                  var instance: JarvisAccessibility? = null
+              }
+
+              override fun onServiceConnected() { instance = this }
+              override fun onDestroy() { instance = null; super.onDestroy() }
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+
+              /** dir: up/down/left/right - куди рухається ПАЛЕЦЬ */
+              fun swipe(dir: String) {
+                  val m = resources.displayMetrics
+                  val w = m.widthPixels.toFloat()
+                  val h = m.heightPixels.toFloat()
+                  val cx = w / 2
+                  val cy = h / 2
+                  val dy = h * 0.3f
+                  val dx = w * 0.3f
+                  val (sx, sy, ex, ey) = when (dir) {
+                      "up" -> listOf(cx, cy + dy, cx, cy - dy)
+                      "down" -> listOf(cx, cy - dy, cx, cy + dy)
+                      "left" -> listOf(cx + dx, cy, cx - dx, cy)
+                      else -> listOf(cx - dx, cy, cx + dx, cy)
+                  }
+                  val path = Path().apply { moveTo(sx, sy); lineTo(ex, ey) }
+                  val g = GestureDescription.Builder()
+                      .addStroke(GestureDescription.StrokeDescription(path, 0, 250))
+                      .build()
+                  dispatchGesture(g, null, null)
+              }
+
+              fun tapCenter() {
+                  val m = resources.displayMetrics
+                  val path = Path().apply { moveTo(m.widthPixels / 2f, m.heightPixels / 2f) }
+                  dispatchGesture(
+                      GestureDescription.Builder()
+                          .addStroke(GestureDescription.StrokeDescription(path, 0, 50)).build(),
+                      null, null
+                  )
+              }
+          }
+          JARVIS_EOF
+          cat > app/src/main/java/com/example/jarvis/JarvisService.kt <<'JARVIS_EOF'
+          package com.example.jarvis
+
+          import android.accessibilityservice.AccessibilityService
+          import android.app.*
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.os.*
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import org.vosk.Model
+          import org.vosk.Recognizer
+          import org.vosk.android.RecognitionListener
+          import org.vosk.android.SpeechService
+          import org.vosk.android.StorageService
+          import java.util.Locale
+
+          class JarvisService : Service(), TextToSpeech.OnInitListener {
+
+              private var speech: SpeechService? = null
+              private lateinit var tts: TextToSpeech
+              private val handler = Handler(Looper.getMainLooper())
+              private val resume = Runnable { speech?.setPause(false) }
+              private val wake = Regex("(дж[аеи]\\p{L}*|жарв\\p{L}*|чарв\\p{L}*|ярвіс|jarvis)")
+
+              // Що ти говориш -> частини назв додатка (англ. та укр.)
+              private val aliases: Map<String, List<String>> = mapOf(
+                  "тг" to listOf("telegram"), "телеграм" to listOf("telegram"), "телега" to listOf("telegram"),
+                  "тт" to listOf("tiktok"), "тікток" to listOf("tiktok"), "тік" to listOf("tiktok"),
+                  "ютуб" to listOf("youtube", "ютуб"), "ютюб" to listOf("youtube"), "юту" to listOf("youtube"),
+                  "інстаграм" to listOf("instagram"), "інста" to listOf("instagram"),
+                  "ватсап" to listOf("whatsapp"), "вотсап" to listOf("whatsapp"), "вацап" to listOf("whatsapp"),
+                  "вайбер" to listOf("viber"), "хром" to listOf("chrome"),
+                  "спотіфай" to listOf("spotify"), "спотифай" to listOf("spotify"),
+                  "нетфлікс" to listOf("netflix"), "дискорд" to listOf("discord"),
+                  "гугл" to listOf("google"), "пошта" to listOf("gmail", "пошта"), "джимейл" to listOf("gmail"),
+                  "монобанк" to listOf("mono"), "моно" to listOf("mono"),
+                  "снепчат" to listOf("snapchat"), "фейсбук" to listOf("facebook"),
+                  "камер" to listOf("camera", "камера"), "налаштування" to listOf("settings", "налаштування"),
+                  "карти" to listOf("maps", "карти"), "телефон" to listOf("phone", "телефон"),
+                  "фото" to listOf("photos", "фото"),
+                  "дуолінго" to listOf("duolingo"), "тему" to listOf("temu"), "бамп" to listOf("bump")
+              )
+
+              private fun normalize(s: String): String = s.lowercase()
+                  .replace("те ге", "тг").replace("те те", "тт")
+                  .replace("тік ток", "тікток").replace("тік-ток", "тікток")
+                  .replace(Regex("[,.!?]"), " ").replace(Regex("\\s+"), " ").trim()
+
+              // Список фраз, які Джарвіс очікує почути (так розпізнавання набагато точніше)
+              private fun buildGrammar(): String {
+                  val pm = packageManager
+                  val cyr = Regex("[а-яіїєґ' ]+")
+                  val labels = pm.queryIntentActivities(
+                      Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
+                  ).map { it.loadLabel(pm).toString().lowercase() }.filter { cyr.matches(it) }
+                  val spoken = (aliases.keys + listOf("камеру", "камера", "те ге", "те те", "тік ток") + labels).toSet()
+                  val wakes = listOf("джарвіс", "джава")
+                  val verbs = listOf("відкрий", "запусти")
+                  val phrases = mutableSetOf<String>()
+                  for (a in spoken) for (v in verbs) {
+                      phrases.add("$v $a")
+                      for (w in wakes) phrases.add("$w $v $a")
+                  }
+                  val gestures = listOf("свайпни", "прокрути")
+                  val dirs = listOf("вниз", "вгору", "вліво", "вправо")
+                  val simple = listOf("назад", "додому", "нещодавні", "сповіщення", "натисни", "стоп")
+                  for (w in wakes) {
+                      phrases.add(w)
+                      for (g in gestures) for (d in dirs) phrases.add("$w $g $d")
+                      for (c in simple) phrases.add("$w $c")
+                  }
+                  phrases.add("[unk]")
+                  return JSONArray(phrases.toList()).toString()
+              }
+
+              private fun findApp(cmd: String): android.content.pm.ResolveInfo? {
+                  val pm = packageManager
+                  val apps = pm.queryIntentActivities(
+                      Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
+                  )
+                  val labels = apps.map { it to it.loadLabel(pm).toString().lowercase() }
+                  val words = normalize(cmd).split(" ").filter { it.isNotBlank() }
+                  // 1) за списком скорочень та назв
+                  for (w in words) {
+                      for ((key, cands) in aliases) {
+                          val hit = w == key || (key.length >= 4 && w.startsWith(key))
+                          if (hit) for (c in cands) {
+                              labels.firstOrNull { it.second.contains(c) }?.let { return it.first }
+                          }
+                      }
+                  }
+                  // 2) назва додатка зустрічається в команді
+                  val full = normalize(cmd)
+                  labels.firstOrNull { it.second.length >= 3 && full.contains(it.second) }?.let { return it.first }
+                  // 3) слово з команди - початок назви додатка
+                  for (w in words) {
+                      if (w.length >= 4) labels.firstOrNull { it.second.startsWith(w) }?.let { return it.first }
+                  }
+                  return null
+              }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel("jarvis", "Jarvis", NotificationManager.IMPORTANCE_LOW)
+                  )
+                  val n = Notification.Builder(this, "jarvis")
+                      .setContentTitle("Джарвіс слухає")
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                      .build()
+                  startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  tts = TextToSpeech(this, this)
+                  toast("Завантажую мовну модель (перший раз довго)...")
+                  loadModel()
+              }
+
+              private fun toast(msg: String) {
+                  android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
+              }
+
+              private fun loadModel() {
+                  StorageService.unpack(
+                      this, "model-uk", "model",
+                      StorageService.Callback<Model> { model ->
+                          val rec = try {
+                              Recognizer(model, 16000.0f, buildGrammar())
+                          } catch (e: Throwable) {
+                              Recognizer(model, 16000.0f)
+                          }
+                          speech = SpeechService(rec, 16000.0f)
+                          speech?.startListening(listener)
+                          toast("Джарвіс слухає")
+                      },
+                      StorageService.Callback<java.io.IOException> { e ->
+                          toast("Помилка моделі: ${e.message}")
+                      }
+                  )
+              }
+
+              private val listener = object : RecognitionListener {
+                  override fun onPartialResult(hypothesis: String?) {}
+                  override fun onResult(hypothesis: String?) {
+                      val text = try { JSONObject(hypothesis ?: "{}").optString("text") } catch (e: Exception) { "" }
+                      if (text.isNotBlank()) handle(text)
+                  }
+                  override fun onFinalResult(hypothesis: String?) {}
+                  override fun onError(exception: Exception?) { toast("Помилка: ${exception?.message}") }
+                  override fun onTimeout() {}
+              }
+
+              override fun onInit(status: Int) {
+                  if (status != TextToSpeech.SUCCESS) { toast("Синтез мовлення не запустився"); return }
+                  tts.language = Locale("uk", "UA")
+                  tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                      override fun onStart(utteranceId: String?) {}
+                      override fun onDone(utteranceId: String?) {
+                          handler.post { handler.removeCallbacks(resume); speech?.setPause(false) }
+                      }
+                      override fun onError(utteranceId: String?) {
+                          handler.post { handler.removeCallbacks(resume); speech?.setPause(false) }
+                      }
+                  })
+                  say("Системи в нормі, сер. Я весь у вашому розпорядженні.")
+              }
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onDestroy() {
+                  handler.removeCallbacksAndMessages(null)
+                  speech?.stop()
+                  speech?.shutdown()
+                  tts.shutdown()
+                  super.onDestroy()
+              }
+
+              // ---------- Команди ----------
+
+              private fun handle(text: String) {
+                  val t = text.lowercase()
+                  toast("Почув: $text")
+                  val m = wake.find(t)
+                  if (m == null) {
+                      // без слова "Джарвіс" приймаємо лише "відкрий <додаток>"
+                      if ((t.contains("відкр") || t.contains("запуст")) && findApp(t) != null) openApp(t)
+                      return
+                  }
+                  val cmd = t.substring(m.range.last + 1).trim(' ', ',', '.', '!')
+                  if (cmd.isEmpty()) { say("Слухаю, сер."); return }
+                  runCommand(cmd)
+              }
+
+              private fun runCommand(cmd: String) {
+                  val a11y = JarvisAccessibility.instance
+                  fun needA11y(block: (JarvisAccessibility) -> Unit) {
+                      if (a11y == null) say("Спершу увімкніть мені спеціальні можливості, сер. Я ж не чарівник.")
+                      else block(a11y)
+                  }
+                  when {
+                      cmd.contains("відкр") || cmd.contains("запуст") || cmd.contains("включ") || cmd.contains("відчин") ->
+                          openApp(cmd)
+
+                      cmd.contains("свайп") || cmd.contains("прокрут") || cmd.contains("скрол") -> needA11y {
+                          val finger = when {
+                              cmd.contains("вниз") -> "down"
+                              cmd.contains("вгору") || cmd.contains("вверх") -> "up"
+                              cmd.contains("ліво") -> "left"
+                              cmd.contains("право") -> "right"
+                              else -> null
+                          }
+                          if (finger == null) { say("Куди саме, сер? Я не телепат."); return@needA11y }
+                          // "свайпни" = палець рухається в цей бік; "прокрути" = вміст їде в цей бік
+                          val isScroll = !cmd.contains("свайп")
+                          val dir = if (isScroll) when (finger) {
+                              "down" -> "up"; "up" -> "down"; "left" -> "right"; else -> "left"
+                          } else finger
+                          it.swipe(dir)
+                          say(listOf("Зроблено, сер.", "Як побажаєте.", "Легко.").random())
+                      }
+
+                      cmd.contains("назад") -> needA11y { it.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK); say("Крок назад, сер.") }
+                      cmd.contains("додому") || cmd.contains("головн") -> needA11y { it.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME); say("Вдома, сер.") }
+                      cmd.contains("нещодавн") || cmd.contains("останні") -> needA11y { it.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS); say("Ось що ви відкривали.") }
+                      cmd.contains("сповіщен") -> needA11y { it.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS); say("Ваші сповіщення, сер.") }
+                      cmd.contains("натисни") || cmd.contains("тапни") -> needA11y { it.tapCenter(); say("Тап.") }
+
+                      cmd.contains("стоп") || cmd.contains("вимкнись") -> { say("Відходжу в тінь, сер."); handler.postDelayed({ stopSelf() }, 2500) }
+
+                      else -> {
+                          if (findApp(cmd) != null) openApp(cmd)
+                          else say(listOf(
+                              "Не розумію, сер. Спробуйте ще раз, цього разу зрозуміліше.",
+                              "Таку команду мене не вчили. Ви, мабуть, перший.",
+                          ).random())
+                      }
+                  }
+              }
+
+              private fun openApp(spoken: String) {
+                  val hit = findApp(spoken)
+                  val launch = hit?.let { packageManager.getLaunchIntentForPackage(it.activityInfo.packageName) }
+                  if (launch == null) {
+                      say("Не знаходжу такого додатка, сер. Я почув: $spoken")
+                      return
+                  }
+                  launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  say(listOf("Звісно, сер.", "Вже відкриваю.", "Як завжди, до ваших послуг.").random())
+                  startActivity(launch)
+              }
+
+              private fun say(text: String) {
+                  toast("Джарвіс: $text")
+                  speech?.setPause(true)
+                  handler.removeCallbacks(resume)
+                  handler.postDelayed(resume, 7000)
+                  tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis")
+              }
+          }
+          JARVIS_EOF
+      - name: Download Ukrainian speech model
+        run: |
+          curl -fL --retry 3 -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-uk-v3-small.zip || curl -fL --retry 3 -o model.zip https://huggingface.co/rhasspy/vosk-models/resolve/main/uk/vosk-model-small-uk-v3-small.zip
+          unzip -q model.zip -d tmpmodel
+          mkdir -p app/src/main/assets
+          mv "$(ls -d tmpmodel/*/ | head -1)" app/src/main/assets/model-uk
+          cat /proc/sys/kernel/random/uuid > app/src/main/assets/model-uk/uuid
+          rm model.zip
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - name: Publish APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-$(date +%Y%m%d-%H%M%S)" app/build/outputs/apk/debug/app-debug.apk --repo "$GITHUB_REPOSITORY" --title "Jarvis" --notes "Jarvis APK"
