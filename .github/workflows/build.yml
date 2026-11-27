@@ -1,43 +1,38 @@
 name: Build Jarvis
-
 on:
   push:
   workflow_dispatch:
-
 permissions:
   contents: write
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-
+      - name: Arrange sources
+        run: |
+          mkdir -p app/src/main/java/com/example/jarvis
+          cp Ai.kt JarvisAccessibility.kt JarvisService.kt MainActivity.kt app/src/main/java/com/example/jarvis/
       - name: Download Ukrainian speech model
         run: |
           curl -fL --retry 3 -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-uk-v3-small.zip
           unzip -q model.zip -d tmpmodel
-          mkdir -p app/src/main/assets/model-uk
-          mv "$(ls -d tmpmodel/*/ | head -1)"* app/src/main/assets/model-uk/
-          cat /proc/sys/kernel/random/uuid > app/src/main/assets/model-uk/uuid
-          rm -rf model.zip tmpmodel
-
+          mkdir -p src/main/assets
+          mv "$(ls -d tmpmodel/*/ | head -1)" src/main/assets/model-uk
+          echo uk-v3-small > src/main/assets/model-uk/uuid
+          rm model.zip
       - name: Build APK
         run: gradle assembleDebug --no-daemon
-
       - name: Publish APK
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: Build ${{ github.run_number }}
-          files: "**/*.apk"
-          
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=$(find . -name '*.apk' -path '*debug*' | head -1)
+          gh release create "build-$(date +%Y%m%d-%H%M%S)" "$APK" --repo "$GITHUB_REPOSITORY" --title "Jarvis" --notes "Jarvis APK"
