@@ -16,7 +16,6 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Unpack sources
       - name: Download Ukrainian speech model
         run: |
           curl -fL --retry 3 -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-uk-v3-small.zip || curl -fL --retry 3 -o model.zip https://huggingface.co/rhasspy/vosk-models/resolve/main/uk/vosk-model-small-uk-v3-small.zip
