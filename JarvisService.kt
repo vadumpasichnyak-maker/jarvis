@@ -118,7 +118,11 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         tts = TextToSpeech(this, this)
         toast("Завантажую мовну модель (перший раз довго)...")
-        loadModel()
+        try {
+    loadModel()
+} catch (e: Exception) {
+    android.util.Log.e("JarvisService", "Failed to load model", e)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
