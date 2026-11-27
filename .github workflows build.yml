@@ -236,7 +236,7 @@ jobs:
                   "вайбер" to "viber", "спотіфай" to "spotify", "нетфлікс" to "netflix",
                   "дискорд" to "discord", "гугл" to "google", "фейсбук" to "facebook",
                   "пошта" to "gmail", "джимейл" to "gmail", "монобанк" to "mono",
-                  "снепчат" to "snapchat", "твіттер" to "x", "ікс" to "x"
+                  "снепчат" to "snapchat", "твіттер" to "x", "ікс" to "x", "кт-ко" to "tiktok"
               )
 
               override fun onCreate() {
