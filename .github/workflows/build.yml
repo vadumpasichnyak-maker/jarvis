@@ -26,17 +26,16 @@ jobs:
         run: |
           curl -fL --retry 3 -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-uk-v3-small.zip
           unzip -q model.zip -d tmpmodel
-          mkdir -p project/app/src/main/assets/model-uk
-          mv "$(ls -d tmpmodel/*/ | head -1)"* project/app/src/main/assets/model-uk/
-          cat /proc/sys/kernel/random/uuid > project/app/src/main/assets/model-uk/uuid
+          mkdir -p app/src/main/assets/model-uk
+          mv "$(ls -d tmpmodel/*/ | head -1)"* app/src/main/assets/model-uk/
+          cat /proc/sys/kernel/random/uuid > app/src/main/assets/model-uk/uuid
           rm -rf model.zip tmpmodel
 
       - name: Build APK
-        working-directory: project
         run: gradle assembleDebug --no-daemon
 
       - name: Publish APK
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "build-$(date +%Y%m%d-%H%M%S)" project/app/build/outputs/apk/debug/app-debug.apk --repo "$GITHUB_REPOSITORY" --title "Build $(date +%Y-%m-%d)" --notes "Automated debug build"
+          gh release create "build-$(date +%Y%m%d-%H%M%S)" app/build/outputs/apk/debug/app-debug.apk --repo "$GITHUB_REPOSITORY" --title "Build $(date +%Y-%m-%d)" --notes "Automated debug build"
