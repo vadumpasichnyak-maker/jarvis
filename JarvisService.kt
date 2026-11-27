@@ -115,7 +115,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .addAction(stopAction)
             .build()
-        startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        startForeground(1, n)
         tts = TextToSpeech(this, this)
         toast("Завантажую мовну модель (перший раз довго)...")
         try {
