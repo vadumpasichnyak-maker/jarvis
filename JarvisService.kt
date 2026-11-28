@@ -394,12 +394,30 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         val t = text.lowercase()
         toast("Почув: $text")
         val m = wake.find(t)
-        if (m == null) {
-            // без слова "Джарвіс" приймаємо лише "відкрий <додаток>"
-            if (t.contains("відкр") || t.contains("запуст")) {
-                bg.execute { if (launchApp(t)) say("Звісно, сер.") }
-            }
-            return
+        val tTrigger = "дай"
+        val dateTrigger = "дає"
+
+        val cleanT = t.replace(",", "").replace(":", "").trim().lowercase()
+
+        if (cleanT.contains(tTrigger) || cleanT.contains(dateTrigger)) {
+        val delimiter = if (cleanT.contains(tTrigger)) "дай" else "дає"
+        val question = text.trim()
+        .substringAfter(delimiter, "")
+        .trim()
+        .removePrefix("відповідь на питання")
+        .removePrefix("відповідь")
+        .trim()
+
+    if (question.isNotEmpty()) {
+        say("Думаю...")
+        bg.execute {
+            val answer = kotlinx.coroutines.runBlocking { Ai.askGemini(question) }
+            say(answer)
+        }
+    }
+    return
+}
+
         }
         val cmd = t.substring(m.range.last + 1).trim(' ', ',', '.', '!')
         if (cmd.isEmpty()) { say("Слухаю, сер."); return }
