@@ -9,15 +9,16 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 object Ai {
-    // Встав сюди свій ключ Gemini API або передавай його з BuildConfig / налаштувань
     private const val API_KEY = "AQ.Ab8RN6InNpacG8AGahe0uVToEy9sJy0hXMalgEX2eZUVcpFk1g"
     private const val MODEL = "gemini-2.5-flash"
     private const val ENDPOINT =
-        "https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=$API_KEY"
+        "https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent"
 
     suspend fun askGemini(prompt: String): String = withContext(Dispatchers.IO) {
-        if (prompt.isBlank()) return@withContext "Питання порожнє."
-        if (API_KEY == "AQ.Ab8RN6InNpacG8AGahe0uVToEy9sJy0hXMalgEX2eZUVcpFk1g" || API_KEY.isBlank()) {
+        if (prompt.isBlank()) {
+            return@withContext "Питання порожнє."
+        }
+        if (API_KEY.isBlank() || API_KEY == "YOUR_GEMINI_API_KEY") {
             return@withContext "Не вказано API-ключ для Gemini."
         }
 
@@ -50,45 +51,47 @@ object Ai {
             }
 
             val responseCode = connection.responseCode
-            val rawResponse = if (responseCode in 200..299) {
-                connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val stream = if (responseCode in 200..299) {
+                connection.inputStream
             } else {
-                val errorText = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                return@withContext "Помилка запиту до Gemini ($responseCode): ${errorText ?: "невідома помилка"}"
+                connection.errorStream
             }
 
-            extractTextFromResponse(rawResponse)
+            val rawText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (responseCode !in 200..299) {
+                return@withContext "Помилка запиту ($responseCode): $rawText"
+            }
+
+            extractText(rawText)
         } catch (e: Exception) {
-            "Помилка з'єднання з Gemini: ${e.localizedMessage ?: "невідома помилка"}"
+            "Помилка з'єднання: ${e.localizedMessage ?: "невідома помилка"}"
         } finally {
             connection?.disconnect()
         }
     }
 
-    private fun extractTextFromResponse(jsonString: String): String {
+    private fun extractText(rawJson: String): String {
         return try {
-            val root = JSONObject(jsonString)
-            val candidates = root.optJSONArray("candidates")
-                ?: return "Не вдалося отримати відповідь від Gemini."
-            if (candidates.length() == 0) return "Gemini не повернув варіантів відповіді."
+            val root = JSONObject(rawJson)
+            val candidates = root.optJSONArray("candidates") ?: return "Порожня відповідь від Gemini."
+            if (candidates.length() == 0) return "Немає варіантів відповіді."
 
             val content = candidates.getJSONObject(0).optJSONObject("content")
-                ?: return "Порожній контент у відповіді."
-            val parts = content.optJSONArray("parts")
-                ?: return "Відповідь не містить тексту."
+                ?: return "Некоректний формат відповіді."
+            val parts = content.optJSONArray("parts") ?: return "Немає тексту у відповіді."
 
-            val builder = StringBuilder()
+            val sb = StringBuilder()
             for (i in 0 until parts.length()) {
-                val text = parts.getJSONObject(i).optString("text", "")
-                if (text.isNotEmpty()) {
-                    builder.append(text)
+                val partText = parts.getJSONObject(i).optString("text", "")
+                if (partText.isNotEmpty()) {
+                    sb.append(partText)
                 }
             }
 
-            val result = builder.toString().trim()
-            if (result.isEmpty()) "Отримано порожню відповідь." else result
+            val result = sb.toString().trim()
+            if (result.isEmpty()) "Порожня відповідь." else result
         } catch (e: Exception) {
-            "Помилка читання відповіді Gemini: ${e.localizedMessage ?: "невідома помилка"}"
+            "Помилка парсингу відповіді: ${e.localizedMessage ?: "невідома помилка"}"
         }
     }
 }
