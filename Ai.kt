@@ -10,14 +10,14 @@ import java.net.URL
 
 object Ai {
     // Встав сюди свій ключ Gemini API або передавай його з BuildConfig / налаштувань
-    private const val API_KEY = "YOUR_GEMINI_API_KEY"
+    private const val API_KEY = "AQ.Ab8RN6InNpacG8AGahe0uVToEy9sJy0hXMalgEX2eZUVcpFk1g"
     private const val MODEL = "gemini-2.5-flash"
     private const val ENDPOINT =
         "https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent?key=$API_KEY"
 
     suspend fun askGemini(prompt: String): String = withContext(Dispatchers.IO) {
         if (prompt.isBlank()) return@withContext "Питання порожнє."
-        if (API_KEY == "YOUR_GEMINI_API_KEY" || API_KEY.isBlank()) {
+        if (API_KEY == "AQ.Ab8RN6InNpacG8AGahe0uVToEy9sJy0hXMalgEX2eZUVcpFk1g" || API_KEY.isBlank()) {
             return@withContext "Не вказано API-ключ для Gemini."
         }
 
