@@ -163,6 +163,46 @@ class JarvisAccessibility : AccessibilityService() {
         return false
     }
 
+    // ---------- Bluetooth через швидкі налаштування ----------
+
+    private fun stateOf(n: AccessibilityNodeInfo): String {
+        val sd = n.stateDescription?.toString() ?: ""
+        val cd = n.contentDescription?.toString() ?: ""
+        val tx = n.text?.toString() ?: ""
+        return (sd + " " + cd + " " + tx).lowercase()
+    }
+
+    /** desired: true - увімкнути, false - вимкнути, null - перемкнути. Повертає "on", "off" або "" якщо не вдалось. */
+    fun setBluetooth(desired: Boolean?): String {
+        performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
+        Thread.sleep(1600)
+        var tile: AccessibilityNodeInfo? = null
+        for (name in listOf("Bluetooth", "Блютуз")) {
+            tile = findNodes(name).firstOrNull { !it.isEditable }
+            if (tile != null) break
+        }
+        if (tile == null) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            return ""
+        }
+        var st = ""
+        var cur: AccessibilityNodeInfo? = tile
+        var depth = 0
+        while (cur != null && depth < 4) {
+            st += " " + stateOf(cur)
+            cur = cur.parent
+            depth++
+        }
+        val isOn = st.contains("увімкнено") || Regex("\\bon\\b").containsMatchIn(st)
+        val isOff = st.contains("вимкнено") || Regex("\\boff\\b").containsMatchIn(st)
+        val want = desired ?: !isOn
+        val already = (want && isOn) || (!want && isOff)
+        if (!already) clickNode(tile)
+        Thread.sleep(800)
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        return if (want) "on" else "off"
+    }
+
     // ---------- Камера ----------
 
     fun clickShutter() {

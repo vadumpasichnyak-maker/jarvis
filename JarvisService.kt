@@ -6,6 +6,17 @@ import android.app.*
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.media.AudioDeviceInfo
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AudioEffect
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
 import android.os.*
 import android.provider.ContactsContract
@@ -15,8 +26,6 @@ import android.speech.tts.UtteranceProgressListener
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
-import org.vosk.android.RecognitionListener
-import org.vosk.android.SpeechService
 import org.vosk.android.StorageService
 import java.net.URLEncoder
 import java.util.Locale
@@ -24,12 +33,18 @@ import java.util.concurrent.Executors
 
 class JarvisService : Service(), TextToSpeech.OnInitListener {
 
-    private var speech: SpeechService? = null
+    @Volatile private var running = false
+    @Volatile private var paused = false
+    @Volatile private var resetRequested = false
+    @Volatile private var useHeadsetMic = true
+    @Volatile private var torchOn = false
+    private var audioThread: Thread? = null
+    private val effects = mutableListOf<AudioEffect>()
     private lateinit var tts: TextToSpeech
     private val handler = Handler(Looper.getMainLooper())
     private val bg = Executors.newSingleThreadExecutor()
     private val modelExecutor = Executors.newSingleThreadExecutor()
-    private val resume = Runnable { speech?.setPause(false) }
+    private val resume = Runnable { setPaused(false) }
     private val wake = Regex("(дж[аеи]\\p{L}*|жарв\\p{L}*|чарв\\p{L}*|ярвіс|jarvis)")
 
     // Що ти говориш -> частини назв додатка (англ. та укр.)
@@ -129,6 +144,14 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             .addAction(stopAction)
             .build()
         startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        useHeadsetMic = getSharedPreferences("jarvis", MODE_PRIVATE).getBoolean("headset_mic", true)
+        try {
+            val cm = getSystemService(CameraManager::class.java)
+            cm.registerTorchCallback(object : CameraManager.TorchCallback() {
+                override fun onTorchModeChanged(cameraId: String, enabled: Boolean) { torchOn = enabled }
+            }, handler)
+        } catch (e: Exception) {
+        }
         tts = TextToSpeech(this, this)
         loadModel()
     }
@@ -136,7 +159,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP_SPEAK") {
             tts.stop()
-            handler.post { handler.removeCallbacks(resume); speech?.setPause(false) }
+            handler.post { handler.removeCallbacks(resume); setPaused(false) }
         }
         return START_STICKY
     }
@@ -156,12 +179,8 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
                 modelExecutor.execute {
                     try {
                         val rec = Recognizer(model, 16000.0f)
-                        val svc = SpeechService(rec, 16000.0f)
-                        handler.post {
-                            speech = svc
-                            svc.startListening(listener)
-                            toast("Джарвіс слухає")
-                        }
+                        startAudio(rec)
+                        toast("Джарвіс слухає")
                     } catch (e: Throwable) {
                         android.util.Log.e("JarvisService", "Recognizer init failed", e)
                         toast("Помилка розпізнавача: " + (e.message ?: ""))
@@ -174,15 +193,153 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         )
     }
 
-    private val listener = object : RecognitionListener {
-        override fun onPartialResult(hypothesis: String?) {}
-        override fun onResult(hypothesis: String?) {
-            val text = try { JSONObject(hypothesis ?: "{}").optString("text") } catch (e: Exception) { "" }
-            if (text.isNotBlank()) handle(text)
+    // ---------- Запис звуку (мікрофон телефону або навушників, з придушенням відлуння) ----------
+
+    private fun onVoskResult(json: String) {
+        val text = try { JSONObject(json).optString("text") } catch (e: Exception) { "" }
+        if (text.isNotBlank()) handle(text)
+    }
+
+    private fun setPaused(p: Boolean) {
+        paused = p
+        if (!p) resetRequested = true
+    }
+
+    private fun startAudio(rec: Recognizer) {
+        if (running) return
+        running = true
+        val t = Thread { audioLoop(rec) }
+        t.name = "jarvis-audio"
+        audioThread = t
+        t.start()
+    }
+
+    private fun pickInputDevice(am: AudioManager): AudioDeviceInfo? {
+        val inputs = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
+        val order = listOf(
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO, AudioDeviceInfo.TYPE_BLE_HEADSET,
+            AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_USB_HEADSET
+        )
+        for (t in order) {
+            val d = inputs.firstOrNull { it.type == t }
+            if (d != null) return d
         }
-        override fun onFinalResult(hypothesis: String?) {}
-        override fun onError(exception: Exception?) { toast("Помилка: ${exception?.message}") }
-        override fun onTimeout() {}
+        return null
+    }
+
+    private fun isBluetoothType(t: Int): Boolean =
+        t == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || t == AudioDeviceInfo.TYPE_BLE_HEADSET
+
+    private fun applyCommunicationDevice(am: AudioManager, wantBt: Boolean) {
+        try {
+            if (wantBt) {
+                val d = am.availableCommunicationDevices.firstOrNull { isBluetoothType(it.type) }
+                if (d != null) am.setCommunicationDevice(d)
+            } else {
+                am.clearCommunicationDevice()
+            }
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun attachEffects(sid: Int) {
+        for (e in effects) {
+            try { e.release() } catch (x: Exception) { }
+        }
+        effects.clear()
+        try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                val e = AcousticEchoCanceler.create(sid)
+                if (e != null) { e.setEnabled(true); effects.add(e) }
+            }
+        } catch (x: Exception) { }
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                val e = NoiseSuppressor.create(sid)
+                if (e != null) { e.setEnabled(true); effects.add(e) }
+            }
+        } catch (x: Exception) { }
+        try {
+            if (AutomaticGainControl.isAvailable()) {
+                val e = AutomaticGainControl.create(sid)
+                if (e != null) { e.setEnabled(true); effects.add(e) }
+            }
+        } catch (x: Exception) { }
+    }
+
+    private fun createRecorder(rate: Int, dev: AudioDeviceInfo?): AudioRecord? {
+        return try {
+            val minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            val ar = AudioRecord.Builder()
+                // VOICE_COMMUNICATION вмикає придушення відлуння (щоб не чути відео з динаміка)
+                .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(rate)
+                        .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(maxOf(minBuf, rate * 2))
+                .build()
+            if (ar.state != AudioRecord.STATE_INITIALIZED) {
+                ar.release()
+                null
+            } else {
+                if (dev != null) ar.setPreferredDevice(dev)
+                attachEffects(ar.audioSessionId)
+                ar
+            }
+        } catch (e: Throwable) {
+            android.util.Log.e("JarvisService", "AudioRecord failed", e)
+            null
+        }
+    }
+
+    private fun audioLoop(rec: Recognizer) {
+        val rate = 16000
+        val am = getSystemService(AudioManager::class.java)
+        val buf = ShortArray(3200)
+        var ar: AudioRecord? = null
+        var currentKey = -2
+        try {
+            while (running) {
+                val dev = if (useHeadsetMic) pickInputDevice(am) else null
+                val key = dev?.id ?: -1
+                if (ar == null || key != currentKey) {
+                    try { ar?.stop() } catch (e: Exception) { }
+                    ar?.release()
+                    ar = null
+                    applyCommunicationDevice(am, dev != null && isBluetoothType(dev.type))
+                    val created = createRecorder(rate, dev)
+                    if (created == null) { Thread.sleep(1500); continue }
+                    created.startRecording()
+                    ar = created
+                    currentKey = key
+                    if (dev != null) toast("Мікрофон: " + dev.productName)
+                }
+                val r = ar ?: continue
+                val n = r.read(buf, 0, buf.size)
+                if (n <= 0) { Thread.sleep(40); continue }
+                if (paused) continue
+                if (resetRequested) { rec.reset(); resetRequested = false }
+                if (rec.acceptWaveForm(buf, n)) {
+                    val json = rec.result
+                    handler.post { onVoskResult(json) }
+                }
+            }
+        } catch (e: Throwable) {
+            android.util.Log.e("JarvisService", "Audio loop crashed", e)
+            toast("Помилка запису звуку: " + (e.message ?: ""))
+        } finally {
+            try { ar?.stop() } catch (e: Exception) { }
+            ar?.release()
+            for (e in effects) {
+                try { e.release() } catch (x: Exception) { }
+            }
+            effects.clear()
+            applyCommunicationDevice(am, false)
+        }
     }
 
     override fun onInit(status: Int) {
@@ -191,10 +348,10 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
             override fun onDone(utteranceId: String?) {
-                handler.post { handler.removeCallbacks(resume); speech?.setPause(false) }
+                handler.post { handler.removeCallbacks(resume); setPaused(false) }
             }
             override fun onError(utteranceId: String?) {
-                handler.post { handler.removeCallbacks(resume); speech?.setPause(false) }
+                handler.post { handler.removeCallbacks(resume); setPaused(false) }
             }
         })
         say("Системи в нормі, сер. Я весь у вашому розпорядженні.")
@@ -204,8 +361,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
-        speech?.stop()
-        speech?.shutdown()
+        running = false
         tts.shutdown()
         bg.shutdownNow()
         modelExecutor.shutdownNow()
@@ -217,7 +373,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private fun say(text: String) {
         handler.post {
             toast("Джарвіс: " + text.take(120))
-            speech?.setPause(true)
+            setPaused(true)
             handler.removeCallbacks(resume)
             handler.postDelayed(resume, 5000L + text.length * 90L)
             tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis")
@@ -228,7 +384,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         handler.post {
             tts.stop()
             handler.removeCallbacks(resume)
-            speech?.setPause(false)
+            setPaused(false)
         }
     }
 
@@ -322,7 +478,33 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             val tgIdx = words.indexOfFirst {
                 it == "тг" || it.startsWith("телегр") || it.startsWith("телега") || it == "чат" || it == "чату"
             }
+            val torchWord = words.any { it.startsWith("ліхтар") || it.startsWith("фонар") || lev(it, "ліхтарик") <= 2 }
+            val btWord = words.any { it.startsWith("блю") || it.startsWith("bluetooth") || lev(it, "блютуз") <= 2 } ||
+                cmd.contains("синій зуб") || cmd.contains("синього зуба")
+            val offWord = cmd.contains("вимкн") || cmd.contains("виключ") || cmd.contains("погас") ||
+                cmd.contains("згас") || cmd.contains("загас")
+            val onWord = cmd.contains("увімкн") || cmd.contains("ввімкн") || cmd.contains("включ") || cmd.contains("запал")
+            val desired: Boolean? = if (offWord) false else if (onWord) true else null
             when {
+                torchWord -> setTorch(desired)
+                btWord -> {
+                    val acc = JarvisAccessibility.instance
+                    if (acc == null) say("Потрібні спеціальні можливості, сер.")
+                    else {
+                        val r = acc.setBluetooth(desired)
+                        say(when (r) { "on" -> "Блютуз увімкнено, сер."; "off" -> "Блютуз вимкнено, сер."; else -> "Не знайшов блютуз у швидких налаштуваннях, сер." })
+                    }
+                }
+                cmd.contains("мікрофон") && cmd.contains("навушн") -> {
+                    useHeadsetMic = true
+                    getSharedPreferences("jarvis", MODE_PRIVATE).edit().putBoolean("headset_mic", true).apply()
+                    say("Слухатиму через навушники, сер.")
+                }
+                cmd.contains("мікрофон") && (cmd.contains("телефон") || cmd.contains("динамік")) -> {
+                    useHeadsetMic = false
+                    getSharedPreferences("jarvis", MODE_PRIVATE).edit().putBoolean("headset_mic", false).apply()
+                    say("Слухатиму через мікрофон телефону, сер.")
+                }
                 cmd.contains("подзвони") || cmd.contains("зателефону") || cmd.contains("набери") -> {
                     val name = after(cmd, listOf("контакту", "контакт", "подзвони", "зателефонуй", "набери"))
                     say("Дзвоню, сер.")
@@ -396,6 +578,26 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             n.length >= 5 -> n.dropLast(2)
             n.length == 4 -> n.dropLast(1)
             else -> n
+        }
+    }
+
+    private fun setTorch(desired: Boolean?) {
+        try {
+            val cm = getSystemService(CameraManager::class.java)
+            var id: String? = null
+            for (cid in cm.cameraIdList) {
+                val ch = cm.getCameraCharacteristics(cid)
+                val flash = ch.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
+                val facing = ch.get(CameraCharacteristics.LENS_FACING)
+                if (flash && facing == CameraCharacteristics.LENS_FACING_BACK) { id = cid; break }
+            }
+            if (id == null) { say("Ліхтарика не знайдено, сер."); return }
+            val on = desired ?: !torchOn
+            cm.setTorchMode(id, on)
+            torchOn = on
+            say(if (on) "Хай буде світло, сер." else "Світло вимкнено, сер.")
+        } catch (e: Exception) {
+            toast("Ліхтарик: " + (e.message ?: ""))
         }
     }
 
