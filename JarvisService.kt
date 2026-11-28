@@ -392,6 +392,25 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     private fun handle(text: String) {
         val t = text.lowercase()
+        val trigger = "джарвіс дай відповідь на питання"
+    val cleanT = t.replace(",", "").replace(":", "").trim()
+    if (cleanT.startsWith(trigger)) {
+        val question = text.trim().dropWhile { it.lowercaseChar() != 'я' } // або простіше:
+            .substringAfter("питання", "")
+            .removePrefix(",")
+            .removePrefix(":")
+            .trim()
+
+        if (question.isNotEmpty()) {
+            say("Думаю...")
+            bg.execute {
+                val answer = kotlinx.coroutines.runBlocking { Ai.askGemini(question) }
+                say(answer)
+            }
+        }
+        return
+    }
+    
         toast("Почув: $text")
         val m = wake.find(t)
         if (m == null) {
