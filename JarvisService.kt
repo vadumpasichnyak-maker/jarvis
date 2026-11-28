@@ -12,7 +12,6 @@ import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
-import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -30,12 +29,8 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private val handler = Handler(Looper.getMainLooper())
     private val bg = Executors.newSingleThreadExecutor()
     private val modelExecutor = Executors.newSingleThreadExecutor()
-    
-    private val resume = Runnable { resumeListening() }
+    private val resume = Runnable { speech?.setPause(false) }
     private val wake = Regex("(дж[аеи]\\p{L}*|жарв\\p{L}*|чарв\\p{L}*|ярвіс|jarvis)")
-    private var conversationUntil = 0L
-    private var aiSpoke = false
-    private val history = mutableListOf<Pair<String, String>>()
 
     // Що ти говориш -> частини назв додатка (англ. та укр.)
     private val aliases: Map<String, List<String>> = mapOf(
@@ -45,6 +40,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         "інстаграм" to listOf("instagram"), "інста" to listOf("instagram"),
         "ватсап" to listOf("whatsapp"), "вотсап" to listOf("whatsapp"), "вацап" to listOf("whatsapp"),
         "вайбер" to listOf("viber"), "хром" to listOf("chrome"), "кром" to listOf("chrome"),
+        "хроми" to listOf("chrome"), "хрому" to listOf("chrome"), "гром" to listOf("chrome"),
         "спотіфай" to listOf("spotify"), "спотифай" to listOf("spotify"), "спотік" to listOf("spotify"),
         "нетфлікс" to listOf("netflix"), "дискорд" to listOf("discord"),
         "гугл" to listOf("google"), "пошта" to listOf("gmail", "пошта"), "джимейл" to listOf("gmail"),
@@ -61,24 +57,39 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         .replace("тік ток", "тікток").replace("тік-ток", "тікток")
         .replace(Regex("[,.!?]"), " ").replace(Regex("\\s+"), " ").trim()
 
+    /** Відстань між словами (скільки букв відрізняється) - щоб прощати помилки розпізнавання. */
+    private fun lev(a: String, b: String): Int {
+        val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+        for (i in 0..a.length) dp[i][0] = i
+        for (j in 0..b.length) dp[0][j] = j
+        for (i in 1..a.length) {
+            for (j in 1..b.length) {
+                val c = if (a[i - 1] == b[j - 1]) 0 else 1
+                dp[i][j] = minOf(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + c)
+            }
+        }
+        return dp[a.length][b.length]
+    }
+
     private fun findApp(cmd: String): android.content.pm.ResolveInfo? {
         val pm = packageManager
         val apps = pm.queryIntentActivities(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
         )
         val labels = apps.map { it to it.loadLabel(pm).toString().lowercase() }
-        val words = normalize(cmd).split(" ").filter { it.isNotBlank() }
-        // 1) за списком скорочень та назв
+        val full = normalize(cmd)
+        val words = full.split(" ").filter { it.isNotBlank() }
+        // 1) за списком скорочень та назв (з допуском на помилки розпізнавання)
         for (w in words) {
             for ((key, cands) in aliases) {
-                val hit = w == key || (key.length >= 4 && w.startsWith(key))
+                val limit = if (key.length >= 7) 2 else if (key.length >= 4) 1 else 0
+                val hit = w == key || (key.length >= 4 && w.startsWith(key)) || (limit > 0 && lev(w, key) <= limit)
                 if (hit) for (c in cands) {
                     labels.firstOrNull { it.second.contains(c) }?.let { return it.first }
                 }
             }
         }
         // 2) назва додатка зустрічається в команді
-        val full = normalize(cmd)
         labels.firstOrNull { it.second.length >= 3 && full.contains(it.second) }?.let { return it.first }
         // 3) слово з команди - початок назви додатка
         for (w in words) {
@@ -98,7 +109,6 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     // ---------- Життєвий цикл ----------
 
     override fun onCreate() {
-        try {
         super.onCreate()
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
@@ -118,23 +128,15 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .addAction(stopAction)
             .build()
-        startForeground(1, n)
+        startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         tts = TextToSpeech(this, this)
-        toast("Завантажую мовну модель (перший раз довго)...")
-        try {
-    loadModel()
-} catch (e: Exception) {
-    android.util.Log.e("JarvisService", "Failed to load model", e)
-        }
-        } catch (e: Exception) {
-        android.util.Log.e("JarvisService", "onCreate crash", e)
-        }
+        loadModel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP_SPEAK") {
             tts.stop()
-            handler.post { handler.removeCallbacks(resume); resumeListening() }
+            handler.post { handler.removeCallbacks(resume); speech?.setPause(false) }
         }
         return START_STICKY
     }
@@ -145,32 +147,32 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-
-private fun loadModel() {
-    toast("Завантажую мовну модель (перший раз до хвилини)...")
-    StorageService.unpack(
-        this, "model-uk", "model",
-        StorageService.Callback<Model> { model ->
-            modelExecutor.execute {
-                try {
-                    val rec = Recognizer(model, 16000.0f)
-                    val svc = SpeechService(rec, 16000.0f)
-                    handler.post {
-                        speech = svc
-                        svc.startListening(listener)
-                        toast("Джарвіс слухає")
+    /** Розпаковка моделі йде у фоні (Vosk), а створення розпізнавача - в окремому потоці. */
+    private fun loadModel() {
+        toast("Завантажую мовну модель (перший раз до хвилини)...")
+        StorageService.unpack(
+            this, "model-uk", "model",
+            StorageService.Callback<Model> { model ->
+                modelExecutor.execute {
+                    try {
+                        val rec = Recognizer(model, 16000.0f)
+                        val svc = SpeechService(rec, 16000.0f)
+                        handler.post {
+                            speech = svc
+                            svc.startListening(listener)
+                            toast("Джарвіс слухає")
+                        }
+                    } catch (e: Throwable) {
+                        android.util.Log.e("JarvisService", "Recognizer init failed", e)
+                        toast("Помилка розпізнавача: " + (e.message ?: ""))
                     }
-                } catch (e: Throwable) {
-                    android.util.Log.e("JarvisService", "Recognizer init failed", e)
-                    toast("Помилка розпізнавача: " + (e.message ?: ""))
                 }
+            },
+            StorageService.Callback<java.io.IOException> { e ->
+                toast("Помилка моделі: " + (e.message ?: ""))
             }
-        },
-        StorageService.Callback<java.io.IOException> { e ->
-            toast("Помилка моделі: " + (e.message ?: ""))
-        }
-    )
-}
+        )
+    }
 
     private val listener = object : RecognitionListener {
         override fun onPartialResult(hypothesis: String?) {}
@@ -189,12 +191,10 @@ private fun loadModel() {
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
             override fun onDone(utteranceId: String?) {
-                if (utteranceId == "last") {
-                    handler.post { handler.removeCallbacks(resume); resumeListening() }
-                }
+                handler.post { handler.removeCallbacks(resume); speech?.setPause(false) }
             }
             override fun onError(utteranceId: String?) {
-                handler.post { handler.removeCallbacks(resume); resumeListening() }
+                handler.post { handler.removeCallbacks(resume); speech?.setPause(false) }
             }
         })
         say("Системи в нормі, сер. Я весь у вашому розпорядженні.")
@@ -208,43 +208,19 @@ private fun loadModel() {
         speech?.shutdown()
         tts.shutdown()
         bg.shutdownNow()
+        modelExecutor.shutdownNow()
         super.onDestroy()
-    }
-
-    private fun resumeListening() {
-        speech?.setPause(false)
-        if (aiSpoke) conversationUntil = SystemClock.elapsedRealtime() + 12000L
     }
 
     // ---------- Озвучка ----------
 
-    private fun chunk(text: String): List<String> {
-        val out = mutableListOf<String>()
-        var cur = StringBuilder()
-        for (sentence in text.split(Regex("(?<=[.!?…])\\s+"))) {
-            if (cur.length + sentence.length > 3000) {
-                out.add(cur.toString())
-                cur = StringBuilder()
-            }
-            cur.append(sentence).append(' ')
-        }
-        if (cur.isNotBlank()) out.add(cur.toString())
-        if (out.isEmpty()) out.add(text)
-        return out
-    }
-
-    private fun say(text: String, ai: Boolean = false) {
+    private fun say(text: String) {
         handler.post {
             toast("Джарвіс: " + text.take(120))
-            aiSpoke = ai
             speech?.setPause(true)
             handler.removeCallbacks(resume)
-            handler.postDelayed(resume, 7000L + text.length * 90L)
-            val parts = chunk(text)
-            for ((i, c) in parts.withIndex()) {
-                val id = if (i == parts.size - 1) "last" else "part$i"
-                tts.speak(c, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, id)
-            }
+            handler.postDelayed(resume, 5000L + text.length * 90L)
+            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis")
         }
     }
 
@@ -252,7 +228,7 @@ private fun loadModel() {
         handler.post {
             tts.stop()
             handler.removeCallbacks(resume)
-            resumeListening()
+            speech?.setPause(false)
         }
     }
 
@@ -262,20 +238,15 @@ private fun loadModel() {
         val t = text.lowercase()
         toast("Почув: $text")
         val m = wake.find(t)
-        val now = SystemClock.elapsedRealtime()
-        var cmd = ""
-        if (m != null) {
-            cmd = t.substring(m.range.last + 1).trim(' ', ',', '.', '!')
-            if (cmd.isEmpty()) { say("Слухаю, сер.", true); return }
-        } else if (now < conversationUntil) {
-            cmd = t
-        } else {
+        if (m == null) {
             // без слова "Джарвіс" приймаємо лише "відкрий <додаток>"
-            if ((t.contains("відкр") || t.contains("запуст")) && findApp(t) != null) {
+            if (t.contains("відкр") || t.contains("запуст")) {
                 bg.execute { if (launchApp(t)) say("Звісно, сер.") }
             }
             return
         }
+        val cmd = t.substring(m.range.last + 1).trim(' ', ',', '.', '!')
+        if (cmd.isEmpty()) { say("Слухаю, сер."); return }
         process(cmd)
     }
 
@@ -297,13 +268,10 @@ private fun loadModel() {
     private fun process(cmd0: String) {
         val cmd = normalize(cmd0)
         if (localSimple(cmd)) return
-        val prefs = getSharedPreferences("jarvis", MODE_PRIVATE)
-        val key = prefs.getString("key", "") ?: ""
-        val model = prefs.getString("model", "claude-haiku-5-5") ?: "claude-haiku-5-5"
-        if (key.isNotBlank()) askAi(cmd, key, model) else localFallback(cmd)
+        bg.execute { localFallbackInner(cmd) }
     }
 
-    /** Швидкі команди без ШІ. Повертає true, якщо виконано. */
+    /** Швидкі команди (виконуються одразу). Повертає true, якщо виконано. */
     private fun localSimple(cmd: String): Boolean {
         val a = JarvisAccessibility.instance
         fun need(block: (JarvisAccessibility) -> Unit): Boolean {
@@ -312,6 +280,9 @@ private fun loadModel() {
             return true
         }
         val short = cmd.length < 28
+        val hasDir = cmd.contains("вниз") || cmd.contains("вгору") || cmd.contains("вверх") ||
+            cmd.contains("ліво") || cmd.contains("право") || cmd.contains("донизу") || cmd.contains("нагору")
+        val bareDir = hasDir && cmd.split(" ").size <= 3
         return when {
             cmd == "стоп" || cmd.contains("замовкни") || cmd == "досить" -> { stopSpeaking(); true }
             cmd.contains("вимкнись") -> { say("Відходжу в тінь, сер."); handler.postDelayed({ stopSelf() }, 2500); true }
@@ -319,75 +290,43 @@ private fun loadModel() {
             short && (cmd.contains("додому") || cmd.contains("головн")) -> need { it.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME); say("Вдома, сер.") }
             short && (cmd.contains("нещодавн") || cmd.contains("останні")) -> need { it.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS); say("Ось що ви відкривали.") }
             short && cmd.contains("сповіщен") -> need { it.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS); say("Ваші сповіщення, сер.") }
-            short && (cmd.contains("свайп") || cmd.contains("прокрут") || cmd.contains("скрол") || cmd.contains("листай") || cmd.contains("гортай") || cmd.contains("наступн") || cmd.contains("попередн")) -> need {
+            short && (cmd.contains("свайп") || cmd.contains("прокрут") || cmd.contains("скрол") || cmd.contains("листай") ||
+                cmd.contains("гортай") || cmd.contains("наступн") || cmd.contains("попередн") || bareDir) -> need {
                 val finger = when {
                     cmd.contains("наступн") -> "up"
                     cmd.contains("попередн") -> "down"
-                    cmd.contains("вниз") -> "down"
-                    cmd.contains("вгору") || cmd.contains("вверх") -> "up"
+                    cmd.contains("вниз") || cmd.contains("донизу") -> "down"
+                    cmd.contains("вгору") || cmd.contains("вверх") || cmd.contains("нагору") -> "up"
                     cmd.contains("ліво") -> "left"
                     cmd.contains("право") -> "right"
                     else -> "down"
                 }
-                // "свайпни" = палець рухається в цей бік; "листай/прокрути" = вміст їде в цей бік
+                // "свайпни" = палець рухається в цей бік; просто "вниз"/"листай" = сторінка їде в цей бік
                 val isScroll = !cmd.contains("свайп") && !cmd.contains("наступн") && !cmd.contains("попередн")
                 val dir = if (isScroll) when (finger) {
                     "down" -> "up"; "up" -> "down"; "left" -> "right"; else -> "left"
                 } else finger
                 it.swipe(dir)
-                say(listOf("Зроблено, сер.", "Як побажаєте.", "Легко.").random())
             }
             else -> false
         }
     }
 
-    // ---------- ШІ ----------
+    // ---------- Решта команд ----------
 
-    private fun askAi(cmd: String, key: String, model: String) {
-        bg.execute {
-            try {
-                history.add(Pair("user", cmd))
-                while (history.size > 8) history.removeAt(0)
-                while (history.isNotEmpty() && history[0].first != "user") history.removeAt(0)
-                val raw = Ai.ask(key, model, history)
-                history.add(Pair("assistant", raw))
-                val json = Ai.extractJson(raw)
-                if (json == null) {
-                    say(raw, true)
-                    return@execute
-                }
-                val obj = JSONObject(json)
-                val sayText = obj.optString("say")
-                val actions = obj.optJSONArray("actions") ?: JSONArray()
-                if (sayText.isNotBlank()) say(sayText, actions.length() == 0)
-                for (i in 0 until actions.length()) {
-                    runAction(actions.getJSONObject(i))
-                }
-            } catch (e: Exception) {
-                toast("ШІ: " + (e.message ?: "помилка"))
-                history.clear()
-                localFallbackInner(cmd)
-            }
-        }
-    }
-
-    // ---------- Локальний розбір (без ШІ) ----------
-
-    private fun localFallback(cmd: String) {
-        bg.execute { localFallbackInner(cmd) }
-    }
+    private val prepositions = listOf("з", "із", "зі", "до", "в", "у", "на", "для", "по")
 
     private fun localFallbackInner(cmd: String) {
         try {
+            val words = cmd.split(" ").filter { it.isNotBlank() }
+            val tgIdx = words.indexOfFirst {
+                it == "тг" || it.startsWith("телегр") || it.startsWith("телега") || it == "чат" || it == "чату"
+            }
             when {
                 cmd.contains("подзвони") || cmd.contains("зателефону") || cmd.contains("набери") -> {
                     val name = after(cmd, listOf("контакту", "контакт", "подзвони", "зателефонуй", "набери"))
                     say("Дзвоню, сер.")
                     runAction(act("call", "name", name))
-                }
-                cmd.contains("вимкн") && cmd.contains("телефон") -> {
-                    say("Вимикаю, сер. Не сумуйте без мене.")
-                    runAction(act("power_off"))
                 }
                 cmd.contains("зупини запис") || cmd.contains("стоп запис") || cmd.contains("закінчи запис") -> {
                     say("Зупиняю запис.")
@@ -401,6 +340,12 @@ private fun loadModel() {
                     say("Усміхніться, сер.")
                     runAction(act("camera", "mode", "photo"))
                 }
+                cmd.contains("відео") && (cmd.contains("відкр") || cmd.contains("знайди") || cmd.contains("включи") ||
+                    cmd.contains("увімкни") || cmd.contains("покажи") || cmd.contains("пошукай")) -> {
+                    val q = after(cmd, listOf("відео"))
+                    say("Шукаю відео, сер.")
+                    runAction(act("youtube", "query", q))
+                }
                 cmd.startsWith("включи") || cmd.startsWith("увімкни") || cmd.startsWith("грай") || cmd.startsWith("постав") -> {
                     val rest = after(cmd, listOf("включи", "увімкни", "грай", "постав", "пісню", "пісня", "трек")).trim()
                     if (rest.isNotEmpty() && findApp(rest) != null && rest.split(" ").size <= 2) {
@@ -410,20 +355,19 @@ private fun loadModel() {
                         runAction(act("spotify", "query", rest))
                     }
                 }
-                cmd.contains("відео") && (cmd.contains("відкр") || cmd.contains("знайди") || cmd.contains("включи")) -> {
-                    val q = after(cmd, listOf("відео"))
-                    say("Шукаю відео, сер.")
-                    runAction(act("youtube", "query", q))
-                }
-                cmd.contains("чат") && !cmd.contains("напиши") -> {
-                    val name = after(cmd, listOf("чат з", "чат із", "чат"))
-                    say("Відкриваю чат.")
-                    runAction(act("telegram_chat", "name", name))
+                tgIdx >= 0 -> {
+                    val name = words.drop(tgIdx + 1).filter { it !in prepositions }.joinToString(" ")
+                    if (name.isBlank()) {
+                        if (launchApp("telegram")) say("Звісно, сер.")
+                    } else {
+                        say("Відкриваю чат.")
+                        runAction(act("telegram_chat", "name", name))
+                    }
                 }
                 cmd.startsWith("напиши") -> {
                     val txt = after(cmd, listOf("напиши"))
-                    runAction(act("type", "text", txt))
-                    say("Написав.")
+                    val ok = JarvisAccessibility.instance?.typeText(txt) ?: false
+                    say(if (ok) "Написав." else "Не бачу поля вводу, сер. Спершу натисніть на нього.")
                 }
                 cmd.startsWith("відправ") || cmd.startsWith("надішли") -> {
                     runAction(act("send"))
@@ -436,7 +380,7 @@ private fun loadModel() {
                 }
                 else -> {
                     if (launchApp(cmd)) say(listOf("Звісно, сер.", "Вже відкриваю.", "Як завжди, до ваших послуг.").random())
-                    else say("Не розумію, сер. Для розмов мені потрібен ключ ШІ в налаштуваннях. Я почув: $cmd")
+                    else say("Не розумію, сер. Я почув: $cmd")
                 }
             }
         } catch (e: Exception) {
@@ -449,8 +393,8 @@ private fun loadModel() {
     private fun stem(name: String): String {
         val n = name.lowercase().trim()
         return when {
-            n.length >= 6 -> n.dropLast(2)
-            n.length >= 4 -> n.dropLast(1)
+            n.length >= 5 -> n.dropLast(2)
+            n.length == 4 -> n.dropLast(1)
             else -> n
         }
     }
@@ -458,26 +402,15 @@ private fun loadModel() {
     private fun runAction(a: JSONObject) {
         try {
             val type = a.optString("type")
-            val acc = JarvisAccessibility.instance
             when (type) {
-                "open_app" -> { if (!launchApp(a.optString("name"))) toast("Не знайшов додаток: " + a.optString("name")) }
-                "swipe" -> acc?.swipe(a.optString("dir", "up"))
-                "back" -> acc?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                "home" -> acc?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
-                "recents" -> acc?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS)
-                "notifications" -> acc?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
-                "power_off" -> acc?.powerOff()
                 "spotify" -> playSpotify(a.optString("query"))
                 "youtube" -> openYoutube(a.optString("query"))
-                "telegram_chat" -> telegramChat(a.optString("name"), a.optString("text"))
-                "type" -> acc?.typeText(a.optString("text"))
-                "send" -> acc?.pressSend()
+                "telegram_chat" -> telegramChat(a.optString("name"))
+                "send" -> JarvisAccessibility.instance?.pressSend()
                 "call" -> callContact(a.optString("name"))
                 "camera" -> camera(a.optString("mode"))
                 "tiktok" -> tiktok(a.optString("mode"))
                 "web" -> openWeb(a.optString("query"))
-                "stop_speaking" -> stopSpeaking()
-                "wait" -> Thread.sleep(a.optLong("ms", 1000L))
                 else -> toast("Невідома дія: $type")
             }
         } catch (e: Exception) {
@@ -491,19 +424,23 @@ private fun loadModel() {
     }
 
     private fun playSpotify(query: String) {
-        val i = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH)
-        i.setPackage("com.spotify.music")
-        i.putExtra(MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*")
-        i.putExtra(SearchManager.QUERY, query)
+        val acc = JarvisAccessibility.instance
+        val uri = "spotify:search:" + Uri.encode(query)
         try {
+            val i = Intent(Intent.ACTION_VIEW, Uri.parse(uri))
+            i.setPackage("com.spotify.music")
             startActivity(newTask(i))
         } catch (e: Exception) {
-            try {
-                startActivity(newTask(Intent(Intent.ACTION_VIEW, Uri.parse("spotify:search:" + Uri.encode(query)))))
-            } catch (e2: Exception) {
-                toast("Spotify не знайдено")
-            }
+            toast("Spotify не знайдено")
+            return
         }
+        if (acc == null) return
+        Thread.sleep(5000)
+        // верхній результат пошуку
+        acc.tapFraction(0.5f, 0.30f)
+        Thread.sleep(2500)
+        // якщо відкрилась сторінка альбому/виконавця - натискаємо "Відтворити"
+        acc.clickAnyText(listOf("Відтворити", "Play"), true)
     }
 
     private fun openYoutube(query: String) {
@@ -516,8 +453,8 @@ private fun loadModel() {
             i.setPackage(null)
             startActivity(newTask(i))
         }
-        Thread.sleep(4500)
-        JarvisAccessibility.instance?.tapFraction(0.5f, 0.2f)
+        Thread.sleep(5000)
+        JarvisAccessibility.instance?.tapFraction(0.5f, 0.22f)
     }
 
     private fun openWeb(query: String) {
@@ -531,24 +468,23 @@ private fun loadModel() {
         startActivity(newTask(Intent(Intent.ACTION_VIEW, Uri.parse(url))))
     }
 
-    private fun telegramChat(name: String, text: String) {
+    private fun telegramChat(name: String) {
         val acc = JarvisAccessibility.instance
         if (acc == null) { say("Потрібні спеціальні можливості, сер."); return }
         if (!launchApp("telegram")) { toast("Telegram не знайдено"); return }
         Thread.sleep(2800)
-        acc.clickAnyText(listOf("Пошук", "Search"), true)
+        // повертаємось на список чатів, якщо Telegram відкрився всередині іншого чату
+        if (!acc.clickAnyText(listOf("Пошук", "Search", "Поиск"), true)) {
+            acc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            Thread.sleep(800)
+            if (!acc.clickAnyText(listOf("Пошук", "Search", "Поиск"), true)) acc.tapFraction(0.86f, 0.075f)
+        }
         Thread.sleep(1200)
         val s = stem(name)
         acc.typeText(s)
-        Thread.sleep(2200)
+        Thread.sleep(2300)
         val node = acc.findNodes(s).firstOrNull { !it.isEditable }
         if (node == null || !acc.clickNode(node)) acc.tapFraction(0.5f, 0.22f)
-        if (text.isNotBlank()) {
-            Thread.sleep(2000)
-            acc.typeText(text)
-            Thread.sleep(700)
-            acc.pressSend()
-        }
     }
 
     private fun callContact(name: String) {
@@ -558,9 +494,7 @@ private fun loadModel() {
             say("Дайте мені доступ до контактів і дзвінків, сер. Кнопка 1 в додатку.")
             return
         }
-        val q = name.lowercase().trim()
-        val q2 = if (q.length >= 4) q.dropLast(1) else q
-        var foundName = ""
+        val q = stem(name)
         var foundNumber = ""
         val c = contentResolver.query(
             ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
@@ -573,9 +507,7 @@ private fun loadModel() {
             while (it.moveToNext()) {
                 val n = it.getString(0) ?: continue
                 val num = it.getString(1) ?: continue
-                val ln = n.lowercase()
-                if (ln.contains(q) || ln.contains(q2)) {
-                    foundName = n
+                if (n.lowercase().contains(q)) {
                     foundNumber = num
                     break
                 }
@@ -608,7 +540,6 @@ private fun loadModel() {
     private fun tiktok(mode: String) {
         val acc = JarvisAccessibility.instance
         when (mode) {
-            "open" -> { if (!launchApp("tiktok")) toast("TikTok не знайдено") }
             "record_start" -> {
                 if (!launchApp("tiktok")) { toast("TikTok не знайдено"); return }
                 Thread.sleep(3500)

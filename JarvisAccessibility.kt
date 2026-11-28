@@ -2,6 +2,8 @@ package com.example.jarvis
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
@@ -21,15 +23,15 @@ class JarvisAccessibility : AccessibilityService() {
 
     // ---------- Жести ----------
 
-    /** dir: up/down/left/right - куди рухається ПАЛЕЦЬ */
+    /** dir: up/down/left/right - куди рухається ПАЛЕЦЬ (швидкий свайп) */
     fun swipe(dir: String) {
         val m = resources.displayMetrics
         val w = m.widthPixels.toFloat()
         val h = m.heightPixels.toFloat()
         val cx = w / 2
         val cy = h / 2
-        val dy = h * 0.3f
-        val dx = w * 0.3f
+        val dy = h * 0.27f
+        val dx = w * 0.32f
         val (sx, sy, ex, ey) = when (dir) {
             "up" -> listOf(cx, cy + dy, cx, cy - dy)
             "down" -> listOf(cx, cy - dy, cx, cy + dy)
@@ -38,7 +40,7 @@ class JarvisAccessibility : AccessibilityService() {
         }
         val path = Path().apply { moveTo(sx, sy); lineTo(ex, ey) }
         val g = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 250))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 180))
             .build()
         dispatchGesture(g, null, null)
     }
@@ -127,12 +129,24 @@ class JarvisAccessibility : AccessibilityService() {
 
     fun typeText(text: String): Boolean {
         for (r in rootNodes()) {
-            val f = r.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: firstEditable(r)
-            if (f != null) {
+            val candidates = mutableListOf<AccessibilityNodeInfo>()
+            val inputFocus = r.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (inputFocus != null) candidates.add(inputFocus)
+            val editable = firstEditable(r)
+            if (editable != null) candidates.add(editable)
+            for (f in candidates) {
                 val old = if (f.isShowingHintText) "" else (f.text?.toString() ?: "")
                 val args = Bundle()
                 args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, old + text)
-                return f.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                if (f.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) return true
+                // запасний варіант: вставка з буфера обміну
+                try {
+                    val cm = getSystemService(ClipboardManager::class.java)
+                    cm.setPrimaryClip(ClipData.newPlainText("jarvis", text))
+                    f.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                    if (f.performAction(AccessibilityNodeInfo.ACTION_PASTE)) return true
+                } catch (e: Exception) {
+                }
             }
         }
         return false
@@ -149,14 +163,7 @@ class JarvisAccessibility : AccessibilityService() {
         return false
     }
 
-    // ---------- Системні дії ----------
-
-    fun powerOff() {
-        performGlobalAction(GLOBAL_ACTION_POWER_DIALOG)
-        Thread.sleep(1500)
-        val ok = clickAnyText(listOf("Вимкнути", "Вимкнення", "Power off", "Вимкн"), true)
-        if (!ok) tapFraction(0.5f, 0.5f)
-    }
+    // ---------- Камера ----------
 
     fun clickShutter() {
         val names = listOf(
