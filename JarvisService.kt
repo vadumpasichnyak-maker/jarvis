@@ -45,7 +45,7 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
     private val bg = Executors.newSingleThreadExecutor()
     private val modelExecutor = Executors.newSingleThreadExecutor()
     private val resume = Runnable { setPaused(false) }
-    private val wake = Regex("(дж[аеи]\\p{L}*|жарв\\p{L}*|чарв\\p{L}*|ярвіс|jarvis)")
+    private val wake = Regex("(дж[аеи]\\p{L}*|[дчжшхг]арв\\p{L}*|ярв\\p{L}*|дервіс|jarvis)")
 
     // Що ти говориш -> частини назв додатка (англ. та укр.)
     private val aliases: Map<String, List<String>> = mapOf(
@@ -392,25 +392,6 @@ class JarvisService : Service(), TextToSpeech.OnInitListener {
 
     private fun handle(text: String) {
         val t = text.lowercase()
-        val trigger = "джарвіс дай відповідь на питання"
-    val cleanT = t.replace(",", "").replace(":", "").trim()
-    if (cleanT.startsWith(trigger)) {
-        val question = text.trim().dropWhile { it.lowercaseChar() != 'я' } // або простіше:
-            .substringAfter("питання", "")
-            .removePrefix(",")
-            .removePrefix(":")
-            .trim()
-
-        if (question.isNotEmpty()) {
-            say("Думаю...")
-            bg.execute {
-                val answer = kotlinx.coroutines.runBlocking { Ai.askGemini(question) }
-                say(answer)
-            }
-        }
-        return
-    }
-    
         toast("Почув: $text")
         val m = wake.find(t)
         if (m == null) {
